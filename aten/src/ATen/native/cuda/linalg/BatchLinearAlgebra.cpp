@@ -114,7 +114,7 @@ void magmaLuNoPivBatched(
 template<class scalar_t>
 void magmaCholeskySolve(
     magma_uplo_t uplo, magma_int_t n, magma_int_t nrhs, scalar_t* dA, magma_int_t ldda,
-    scalar_t* dB, magma_int_t lddb, magma_int_t* info, scalar_t* dX, magma_int_t lddx, magma_int_t* posv_iter);
+    scalar_t* dB, magma_int_t lddb, magma_int_t* info);
 
 template<class scalar_t>
 void magmaCholeskySolveBatched(
@@ -385,16 +385,16 @@ void magmaLuNoPivBatched<c10::complex<float>>(
 template<>
 void magmaCholeskySolve<double>(
     magma_uplo_t uplo, magma_int_t n, magma_int_t nrhs, double* dA, magma_int_t ldda,
-    double* dB, magma_int_t lddb, magma_int_t* info, double* dX, magma_int_t lddx, magma_int_t* posv_iter) {
+    double* dB, magma_int_t lddb, magma_int_t* info) {
   MagmaStreamSyncGuard guard;
-  magma_dshposv_native(uplo, n, nrhs, dA, ldda, dB, lddb, dX, lddx, posv_iter, info);
+  magma_dpotrs_gpu(uplo, n, nrhs, dA, ldda, dB, lddb, info);
   AT_CUDA_CHECK(cudaGetLastError());
 }
 
 template<>
 void magmaCholeskySolve<float>(
     magma_uplo_t uplo, magma_int_t n, magma_int_t nrhs, float* dA, magma_int_t ldda,
-    float* dB, magma_int_t lddb, magma_int_t* info, float* dX, magma_int_t lddx, magma_int_t* posv_iter) {
+    float* dB, magma_int_t lddb, magma_int_t* info) {
   MagmaStreamSyncGuard guard;
   magma_spotrs_gpu(uplo, n, nrhs, dA, ldda, dB, lddb, info);
   AT_CUDA_CHECK(cudaGetLastError());
@@ -403,7 +403,7 @@ void magmaCholeskySolve<float>(
 template<>
 void magmaCholeskySolve<c10::complex<double>>(
     magma_uplo_t uplo, magma_int_t n, magma_int_t nrhs, c10::complex<double>* dA, magma_int_t ldda,
-    c10::complex<double>* dB, magma_int_t lddb, magma_int_t* info, c10::complex<double>* dX, magma_int_t lddx, magma_int_t* posv_iter) {
+    c10::complex<double>* dB, magma_int_t lddb, magma_int_t* info) {
   MagmaStreamSyncGuard guard;
   magma_zpotrs_gpu(uplo, n, nrhs,
     reinterpret_cast<magmaDoubleComplex*>(dA), ldda,
@@ -414,7 +414,7 @@ void magmaCholeskySolve<c10::complex<double>>(
 template<>
 void magmaCholeskySolve<c10::complex<float>>(
     magma_uplo_t uplo, magma_int_t n, magma_int_t nrhs, c10::complex<float>* dA, magma_int_t ldda,
-    c10::complex<float>* dB, magma_int_t lddb, magma_int_t* info, c10::complex<float>* dX, magma_int_t lddx, magma_int_t* posv_iter) {
+    c10::complex<float>* dB, magma_int_t lddb, magma_int_t* info) {
   MagmaStreamSyncGuard guard;
   magma_cpotrs_gpu(uplo, n, nrhs,
     reinterpret_cast<magmaFloatComplex*>(dA), ldda,
@@ -472,7 +472,7 @@ void magmaCholesky<float>(
     magma_uplo_t uplo, magma_int_t n, float* dA,
     magma_int_t ldda, magma_int_t* info) {
   MagmaStreamSyncGuard guard;
-  magma_spotrf_gpu(uplo, n, dA, ldda, info);
+  magma_shpotrf_native(uplo, n, dA, ldda, info);
   AT_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1156,44 +1156,24 @@ REGISTER_CUDA_DISPATCH(ldl_solve_stub, &ldl_solve_kernel)
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ cholesky_solve ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 template <typename scalar_t>
-static void apply_cholesky_solve(Tensor& b, const Tensor& A, bool upper, int64_t& info,  Tensor& xsol) {
+static void apply_cholesky_solve(Tensor& b, Tensor& A, bool upper, int64_t& info) {
 #if !AT_MAGMA_ENABLED()
 AT_ERROR("cholesky_solve: MAGMA library not found in "
     "compilation. Please rebuild with MAGMA.");
 #else
   magma_uplo_t uplo = upper ? MagmaUpper : MagmaLower;
 
-  
-  //auto xsol = cloneBatchedColumnMajor(b);
-  
   auto A_data = A.data_ptr<scalar_t>();
   auto b_data = b.data_ptr<scalar_t>();
-  
-  // Getting pointer for x_data
-  auto x_data = xsol.data_ptr<scalar_t>();
-  
   magma_int_t n = magma_int_cast(A.size(-2), "A.size(-2)");
   magma_int_t lda = std::max<magma_int_t>(1, n);
   magma_int_t nrhs = magma_int_cast(b.size(-1), "b.size(-1)");
-  
-  // Adding new integer to track number of iterations
-  magma_int_t posv_iter; 
-  // Creating X for FP16 Mixed precision solver
-  //scalar_t* x_data;
-  //ALLOCATE_ARRAY(x_data, scalar_t, n);
 
   int info_tmp = 0;
   if (b.dim() == 2) {
     magmaCholeskySolve<scalar_t>(uplo, n, nrhs, A_data, lda,
-                                 b_data, lda, &info_tmp, x_data, lda, &posv_iter);
+                                 b_data, lda, &info_tmp);
     info = info_tmp;
-    
-    //for (int64_t i = 0; i < n; i++)
-    //{
-    //  b[i] = xsol[i];
-      //((scalar_t*)b_data)[i] = x_data[i];
-    //}
-    
   } else {
     auto A_mat_stride = matrixStride(A);
     auto b_mat_stride = matrixStride(b);
@@ -1247,14 +1227,12 @@ AT_ERROR("cholesky_solve: MAGMA library not found in "
 Tensor _cholesky_solve_helper_cuda_magma(const Tensor& self, const Tensor& A, bool upper) {
   int64_t info = 0;
   auto self_working_copy = cloneBatchedColumnMajor(self);
-  //auto A_working_copy = cloneBatchedColumnMajor(A);
-  auto xsol = cloneBatchedColumnMajor(self);
+  auto A_working_copy = cloneBatchedColumnMajor(A);
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(self.scalar_type(), "cholesky_solve_cuda", [&]{
-    apply_cholesky_solve<scalar_t>(self_working_copy, A, upper, info, xsol);
+    apply_cholesky_solve<scalar_t>(self_working_copy, A_working_copy, upper, info);
   });
   TORCH_CHECK(info == 0, "MAGMA cholesky_solve : invalid argument: ", -info);
-  return xsol;
-  /**/
+  return self_working_copy;
 }
 
 // Todo: cusolverDn<T>potrsBatched only supports nrhs == 1 and does not have good performance.
@@ -1434,13 +1412,11 @@ static void apply_cholesky_inverse(Tensor& input, Tensor& infos, bool upper) {
     input_u = input_working_copy;
   }
 
-  auto xsol = cloneBatchedColumnMajor(result_u);
-
   // magma's potrs_batched doesn't take matrix-wise array of ints as an 'info' argument
   // it returns a single 'magma_int_t'
   // if info = 0 the operation is successful, if info = -i, the i-th parameter had an illegal value.
   int64_t info_tmp = 0;
-  apply_cholesky_solve<scalar_t>(result_u, input_u, upper, info_tmp, xsol);
+  apply_cholesky_solve<scalar_t>(result_u, input_u, upper, info_tmp);
   infos.fill_(info_tmp);
 #endif
 }
